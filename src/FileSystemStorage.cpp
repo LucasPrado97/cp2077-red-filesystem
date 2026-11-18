@@ -3,6 +3,11 @@
 
 #include <utility>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#include "MacSupport.hpp"  // macos/
+#endif
+
 namespace RedFS {
 
 FileSystemStorage::FileSystemStorage() : rw_permission(false) {}
@@ -172,14 +177,37 @@ std::filesystem::path FileSystemStorage::restrict_path(
     return file_path;
   }
 
+#if defined(__APPLE__)
+  // A mod written on Windows may spell a path with backslashes; they are separators there and plain characters here.
+  {
+    std::string portable = p_path;
+    std::ranges::replace(portable, '\\', '/');
+    file_path = storage_path / portable;
+  }
+  // iOS (CyPort): file names are case-sensitive, Windows mods do not care about case. When the path as written does not
+  // exist, use the spelling that is on disk (the shim resolves it). The result still goes through the checks below.
+  {
+    std::error_code exists_error;
+    if (!std::filesystem::exists(file_path, exists_error)) {
+      file_path = RedMac::ResolveCase(file_path);
+    }
+  }
+#endif
   const std::filesystem::path absolute_path = std::filesystem::weakly_canonical(file_path, p_error);
   if (p_error) {
     FileSystem::debug("Failed to get canonical path for \"{}\": {}", p_path.c_str(), p_error.message().c_str());
     return absolute_path;
   }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+  // iOS: file names are case-sensitive, so "abc" and "ABC" are two folders: compare the paths as they are (both are
+  // canonical), or a path could step into a storage whose name differs only in case.
+  const auto path = absolute_path.string();
+  const auto root_path = storage_path.string();
+#else
   const auto path = to_lower(absolute_path.string());
   const auto root_path = to_lower(storage_path.string());
+#endif
   if (path.find(root_path + "\\") != 0 && path.find(root_path + '/') != 0) {
     FileSystem::debug("Unsafe path detected: \"{}\"", absolute_path.string().c_str());
     p_error = std::make_error_code(std::errc::permission_denied);

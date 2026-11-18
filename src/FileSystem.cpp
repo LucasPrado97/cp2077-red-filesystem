@@ -3,6 +3,10 @@
 
 #include "Utils.h"
 
+#if defined(__APPLE__)
+#include "MacSupport.hpp"  // macos/
+#endif
+
 namespace RedFS {
 
 RED4ext::v1::PluginHandle FileSystem::handle = nullptr;
@@ -20,6 +24,10 @@ bool FileSystem::has_error = true;
 
 // Credits to https://github.com/jackhumbert/cyberpunk2077-input-loader/blob/a6eed8eda9ae97e92ff97e60158c08b945e61036/src/Utils.cpp#L26
 std::filesystem::path FileSystem::get_game_path() {
+#if defined(__APPLE__)
+  // macOS: the folder with red4ext/ and r6/. iOS (CyPort): the game folder in the app's Documents, from the shim.
+  return RedMac::GameRoot();
+#else
   constexpr auto path_length = MAX_PATH + 1;
   std::wstring filename;
 
@@ -36,6 +44,7 @@ std::filesystem::path FileSystem::get_game_path() {
     .parent_path()   // Resolve to "x64" directory.
     .parent_path()   // Resolve to "bin" directory.
     .parent_path();  // Resolve to game root directory.
+#endif
 }
 
 void FileSystem::load(RED4ext::v1::PluginHandle p_handle,
@@ -45,6 +54,10 @@ void FileSystem::load(RED4ext::v1::PluginHandle p_handle,
   detect_mo2();
   game_path = get_game_path();
   storages_path = game_path / "r6" / "storages";
+#if defined(__APPLE__)
+  // iOS (CyPort): file names are case-sensitive; use the spelling of r6/storages that is on disk when there is one.
+  storages_path = RedMac::ResolveCase(storages_path);
+#endif
   bool is_present = request_directory(storages_path);
 
   if (!is_present) {
@@ -54,6 +67,17 @@ void FileSystem::load(RED4ext::v1::PluginHandle p_handle,
     logger->Error(handle, "RedFileSystem has been disabled.");
     return;
   }
+#if defined(__APPLE__)
+  {
+    // restrict_path() compares the canonical path of a file with the storage path. The iOS container is reached through a
+    // symbolic link (/var -> /private/var), so the storage path must be canonical too, or every access is denied.
+    std::error_code error;
+    const auto canonical = std::filesystem::canonical(storages_path, error);
+    if (!error) {
+      storages_path = canonical;
+    }
+  }
+#endif
   auto old_path =
     game_path / "red4ext" / "plugins" / "RedFileSystem" / "storages";
 
@@ -110,6 +134,11 @@ Red::Handle<FileSystemStorage> FileSystem::get_storage(
     return {};
   }
   auto path = storages_path / name;
+#if defined(__APPLE__)
+  // iOS (CyPort): file names are case-sensitive. A storage folder that came with the mod ("MyMod") is the one a request
+  // for "mymod" means, as on Windows.
+  path = RedMac::ResolveCase(path);
+#endif
   bool is_present = request_directory(path);
 
   if (!is_present) {
@@ -174,7 +203,12 @@ bool FileSystem::request_directory(const std::filesystem::path& p_path) {
   if (is_present) {
     return true;
   }
+#if defined(__APPLE__)
+  // r6/ may not exist yet in a fresh game folder on the phone.
+  is_present = std::filesystem::create_directories(p_path, error);
+#else
   is_present = std::filesystem::create_directory(p_path, error);
+#endif
   if (error) {
     return false;
   }
@@ -208,7 +242,11 @@ bool FileSystem::migrate_directory(const std::filesystem::path& p_old_path,
 }
 
 void FileSystem::detect_mo2() {
+#if defined(__APPLE__)
+  has_mo2 = false;  // Mod Organizer 2 is a Windows tool.
+#else
   has_mo2 = GetModuleHandle(TEXT("usvfs_x64.dll")) != nullptr;
+#endif
   if (!has_mo2) {
     return;
   }
